@@ -177,8 +177,15 @@ private:
                 return true;
             }
         } else {
-            int child_idx = upper_bound_key(node.keys, node.num_keys, kv.key) - 1;
-            if (child_idx < 0) child_idx = 0;
+            // Internal node: find which child to descend into
+            int child_idx = 0;
+            for (int i = 0; i < node.num_keys; i++) {
+                if (strcmp(kv.key, node.keys[i].key) >= 0) {
+                    child_idx = i + 1;
+                } else {
+                    break;
+                }
+            }
 
             int child_split_pos;
             KVPair child_up_key;
@@ -186,6 +193,7 @@ private:
 
             if (!child_split) return false;
 
+            // Need to insert child_up_key and child_split_pos into this node
             if (node.num_keys < ORDER) {
                 int insert_pos = lower_bound_pos(node.keys, node.num_keys, child_up_key);
                 memmove(node.keys + insert_pos + 1, node.keys + insert_pos,
@@ -198,10 +206,12 @@ private:
                 write_node(node, pos);
                 return false;
             } else {
+                // Need to split this internal node
                 KVPair temp_keys[ORDER + 1];
                 int temp_children[ORDER + 2];
                 int insert_pos = lower_bound_pos(node.keys, node.num_keys, child_up_key);
 
+                // Build temporary arrays with the new key/child inserted
                 int j = 0, k = 0;
                 for (int i = 0; i <= node.num_keys; i++) {
                     if (i == insert_pos) {
@@ -235,8 +245,15 @@ private:
         while (true) {
             read_node(pos, node);
             if (node.is_leaf) return pos;
-            int child_idx = upper_bound_key(node.keys, node.num_keys, key) - 1;
-            if (child_idx < 0) child_idx = 0;
+            // Find the correct child: keys[i] is the minimum key in children[i+1]
+            int child_idx = 0;
+            for (int i = 0; i < node.num_keys; i++) {
+                if (strcmp(key, node.keys[i].key) >= 0) {
+                    child_idx = i + 1;
+                } else {
+                    break;
+                }
+            }
             pos = node.children[child_idx];
         }
     }
