@@ -1,0 +1,4 @@
+3
+insert key1 100
+insert key2 200
+find key1

@@ -3,12 +3,11 @@
 #include <cstring>
 #include <vector>
 #include <algorithm>
-#include <map>
 
 using namespace std;
 
 const int MAX_KEY_LEN = 65;
-const int ORDER = 100;
+const int ORDER = 50;  // B+ tree order - must support ORDER+1 elements during split
 
 struct KVPair {
     char key[MAX_KEY_LEN];
@@ -35,8 +34,8 @@ struct KVPair {
 struct BPNode {
     bool is_leaf;
     int num_keys;
-    KVPair keys[ORDER];
-    int children[ORDER + 1];
+    KVPair keys[ORDER + 1];  // +1 to allow temporary overflow during split
+    int children[ORDER + 2];  // +2 to allow temporary overflow during split
     int next_leaf;
 
     BPNode() : is_leaf(true), num_keys(0), next_leaf(-1) {
@@ -46,56 +45,41 @@ struct BPNode {
 
 class BPlusTree {
 private:
-    fstream file;
     string filename;
     int root_pos;
     int next_free_pos;
-    map<int, BPNode> cache;
-    bool cache_dirty[10000];
 
     void read_node(int pos, BPNode& node) {
-        if (pos < 0) return;
-        if (cache.find(pos) != cache.end()) {
-            node = cache[pos];
-            return;
-        }
-        file.seekg(pos * sizeof(BPNode));
-        file.read((char*)&node, sizeof(BPNode));
-        cache[pos] = node;
-        cache_dirty[pos] = false;
+        fstream fs(filename, ios::in | ios::binary);
+        fs.seekg(sizeof(int) * 2 + pos * sizeof(BPNode));
+        fs.read((char*)&node, sizeof(BPNode));
+        fs.close();
     }
 
-    int write_node(const BPNode& node, int pos = -1) {
-        if (pos < 0) {
-            pos = next_free_pos++;
-        }
-        cache[pos] = node;
-        cache_dirty[pos] = true;
-        return pos;
-    }
-
-    void flush_cache() {
-        for (auto& p : cache) {
-            if (cache_dirty[p.first]) {
-                file.seekp(p.first * sizeof(BPNode));
-                file.write((const char*)&p.second, sizeof(BPNode));
-                cache_dirty[p.first] = false;
-            }
-        }
-        file.flush();
+    void write_node(const BPNode& node, int pos) {
+        fstream fs(filename, ios::in | ios::out | ios::binary);
+        fs.seekp(sizeof(int) * 2 + pos * sizeof(BPNode));
+        fs.write((const char*)&node, sizeof(BPNode));
+        fs.close();
     }
 
     void save_metadata() {
-        file.seekp(0);
-        file.write((const char*)&root_pos, sizeof(int));
-        file.write((const char*)&next_free_pos, sizeof(int));
-        file.flush();
+        fstream fs(filename, ios::in | ios::out | ios::binary);
+        fs.seekp(0);
+        fs.write((const char*)&root_pos, sizeof(int));
+        fs.write((const char*)&next_free_pos, sizeof(int));
+        fs.close();
     }
 
     void load_metadata() {
-        file.seekg(0);
-        file.read((char*)&root_pos, sizeof(int));
-        file.read((char*)&next_free_pos, sizeof(int));
+        ifstream ifs(filename, ios::binary);
+        ifs.read((char*)&root_pos, sizeof(int));
+        ifs.read((char*)&next_free_pos, sizeof(int));
+        ifs.close();
+    }
+
+    int alloc_node() {
+        return next_free_pos++;
     }
 
     int lower_bound_pos(const KVPair* arr, int n, const KVPair& kv) {
@@ -103,16 +87,6 @@ private:
         while (left < right) {
             int mid = (left + right) / 2;
             if (arr[mid] < kv) left = mid + 1;
-            else right = mid;
-        }
-        return left;
-    }
-
-    int upper_bound_key(const KVPair* arr, int n, const char* key) {
-        int left = 0, right = n;
-        while (left < right) {
-            int mid = (left + right) / 2;
-            if (strcmp(arr[mid].key, key) <= 0) left = mid + 1;
             else right = mid;
         }
         return left;
@@ -143,6 +117,7 @@ private:
         read_node(pos, node);
 
         if (node.is_leaf) {
+            // Check for duplicate
             for (int i = 0; i < node.num_keys; i++) {
                 if (node.keys[i] == kv) return false;
             }
@@ -157,6 +132,7 @@ private:
                 write_node(node, pos);
                 return false;
             } else {
+                // Split leaf
                 KVPair temp[ORDER + 1];
                 int j = 0;
                 for (int i = 0; i < node.num_keys; i++) {
@@ -171,19 +147,19 @@ private:
                 BPNode new_node;
                 split_leaf(node, new_node, up_key);
 
-                split_pos = write_node(new_node);
+                split_pos = alloc_node();
                 node.next_leaf = split_pos;
                 write_node(node, pos);
+                write_node(new_node, split_pos);
+                save_metadata();
                 return true;
             }
         } else {
-            // Internal node: find which child to descend into
+            // Internal node: find correct child
             int child_idx = 0;
             for (int i = 0; i < node.num_keys; i++) {
                 if (strcmp(kv.key, node.keys[i].key) >= 0) {
                     child_idx = i + 1;
-                } else {
-                    break;
                 }
             }
 
@@ -193,7 +169,7 @@ private:
 
             if (!child_split) return false;
 
-            // Need to insert child_up_key and child_split_pos into this node
+            // Insert the split result
             if (node.num_keys < ORDER) {
                 int insert_pos = lower_bound_pos(node.keys, node.num_keys, child_up_key);
                 memmove(node.keys + insert_pos + 1, node.keys + insert_pos,
@@ -206,12 +182,11 @@ private:
                 write_node(node, pos);
                 return false;
             } else {
-                // Need to split this internal node
+                // Split internal node
                 KVPair temp_keys[ORDER + 1];
                 int temp_children[ORDER + 2];
                 int insert_pos = lower_bound_pos(node.keys, node.num_keys, child_up_key);
 
-                // Build temporary arrays with the new key/child inserted
                 int j = 0, k = 0;
                 for (int i = 0; i <= node.num_keys; i++) {
                     if (i == insert_pos) {
@@ -231,8 +206,10 @@ private:
                 BPNode new_node;
                 split_internal(node, new_node, up_key);
 
-                split_pos = write_node(new_node);
+                split_pos = alloc_node();
                 write_node(node, pos);
+                write_node(new_node, split_pos);
+                save_metadata();
                 return true;
             }
         }
@@ -242,13 +219,15 @@ private:
         if (root_pos < 0) return -1;
         int pos = root_pos;
         BPNode node;
+
         while (true) {
             read_node(pos, node);
             if (node.is_leaf) return pos;
-            // Find the correct child: keys[i] is the minimum key in children[i+1]
+
+            // Find leftmost child that could contain the key
             int child_idx = 0;
             for (int i = 0; i < node.num_keys; i++) {
-                if (strcmp(key, node.keys[i].key) >= 0) {
+                if (strcmp(key, node.keys[i].key) > 0) {
                     child_idx = i + 1;
                 } else {
                     break;
@@ -259,34 +238,22 @@ private:
     }
 
 public:
-    BPlusTree(const string& fname) : root_pos(-1), next_free_pos(1) {
-        filename = fname;
-        memset(cache_dirty, 0, sizeof(cache_dirty));
-
+    BPlusTree(const string& fname) : filename(fname), root_pos(0), next_free_pos(1) {
         ifstream test(filename);
         if (test.good()) {
             test.close();
-            file.open(filename, ios::in | ios::out | ios::binary);
             load_metadata();
         } else {
-            file.open(filename, ios::out | ios::binary);
-            file.close();
-            file.open(filename, ios::in | ios::out | ios::binary);
+            ofstream create(filename, ios::binary);
+            create.close();
             BPNode root;
-            root_pos = write_node(root);
             save_metadata();
+            write_node(root, root_pos);
         }
-    }
-
-    ~BPlusTree() {
-        flush_cache();
-        save_metadata();
-        file.close();
     }
 
     void insert(const char* key, int value) {
         KVPair kv(key, value);
-
         int split_pos;
         KVPair up_key;
         bool split = insert_into_node(root_pos, kv, split_pos, up_key);
@@ -298,7 +265,9 @@ public:
             new_root.keys[0] = up_key;
             new_root.children[0] = root_pos;
             new_root.children[1] = split_pos;
-            root_pos = write_node(new_root);
+            root_pos = alloc_node();
+            write_node(new_root, root_pos);
+            save_metadata();
         }
     }
 
@@ -310,26 +279,19 @@ public:
         BPNode node;
         while (leaf_pos >= 0) {
             read_node(leaf_pos, node);
-            bool found_in_node = false;
+            bool found_any = false;
             for (int i = 0; i < node.num_keys; i++) {
                 int cmp = strcmp(node.keys[i].key, key);
                 if (cmp == 0) {
                     result.push_back(node.keys[i].value);
-                    found_in_node = true;
+                    found_any = true;
                 } else if (cmp > 0) {
-                    // Found a key greater than target, no more matches possible
-                    if (!found_in_node && result.empty()) {
-                        // First node and no match, wrong leaf
-                        return result;
-                    }
-                    // Otherwise stop searching
+                    if (!found_any) return result;  // Wrong leaf
                     leaf_pos = -1;
                     break;
                 }
             }
-            if (leaf_pos >= 0) {
-                leaf_pos = node.next_leaf;
-            }
+            if (leaf_pos >= 0) leaf_pos = node.next_leaf;
         }
 
         sort(result.begin(), result.end());
