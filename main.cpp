@@ -293,20 +293,26 @@ public:
         BPNode node;
         while (leaf_pos >= 0) {
             read_node(leaf_pos, node);
-            bool found = false;
+            bool found_in_node = false;
             for (int i = 0; i < node.num_keys; i++) {
                 int cmp = strcmp(node.keys[i].key, key);
                 if (cmp == 0) {
                     result.push_back(node.keys[i].value);
-                    found = true;
+                    found_in_node = true;
                 } else if (cmp > 0) {
+                    // Found a key greater than target, no more matches possible
+                    if (!found_in_node && result.empty()) {
+                        // First node and no match, wrong leaf
+                        return result;
+                    }
+                    // Otherwise stop searching
+                    leaf_pos = -1;
                     break;
                 }
             }
-            if (!found || (node.num_keys > 0 && strcmp(node.keys[node.num_keys - 1].key, key) < 0)) {
-                break;
+            if (leaf_pos >= 0) {
+                leaf_pos = node.next_leaf;
             }
-            leaf_pos = node.next_leaf;
         }
 
         sort(result.begin(), result.end());
